@@ -1,10 +1,10 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from datetime import datetime, date
 import pandas as pd
 from pytdx.hq import TdxHq_API
-from pytdx.params import TDXParams
 import numpy as np
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -16,6 +16,7 @@ import shutil
 import tempfile
 import random
 from urllib.request import urlopen
+import json
 
 # 导入配置
 from config import TDX_SERVERS
@@ -38,407 +39,522 @@ executor = ThreadPoolExecutor(max_workers=10)
 # TDX_SERVERS 已经从 config.py 导入
 
 class TDXConnectionPool:
-    """TDX连接池管理类"""
-    def __init__(self, max_connections=10, timeout=2, test_interval=300):
+    def __init__(self, max_connections=10, timeout=2, test_interval=300, default_server: Dict[str, Any] = None):
         self.max_connections = max_connections
         self.timeout = timeout
         self.test_interval = test_interval
         self._connection_pool = queue.Queue(maxsize=max_connections)
+        self.server = default_server or TDX_SERVERS[0]
         self._connection_worker = Thread(target=self._connection_worker_thread, daemon=True)
         self._connection_worker.start()
-    
-    def _test_server_speed(self, server_config):
-        """测试服务器连接速度"""
+
+    def set_server(self, server: Dict[str, Any]):
+        self.server = server
+
+    def _create_connection(self):
+        api = TdxHq_API()
+        ok = False
         try:
-            api = TdxHq_API(raise_exception=True, auto_retry=False)
-            start_time = time.time()
-            
-            if api.connect(server_config["ip"], server_config["port"], time_out=self.timeout):
-                # 测试连接是否有效
-                security_count = api.get_security_count(0)  # 测试深圳市场
-                if security_count > 0:
-                    elapsed = time.time() - start_time
-                    api.disconnect()
-                    return elapsed
-                api.disconnect()
-            
-            return float('inf')  # 连接失败或无效
+            ok = api.connect(self.server["ip"], self.server["port"])
         except Exception:
-            return float('inf')  # 连接异常
-    
+            ok = False
+        if ok:
+            return api
+        try:
+            api.disconnect()
+        except Exception:
+            pass
+        return None
+
     def _connection_worker_thread(self):
-        """连接池工作线程，维护连接池"""
         while True:
             try:
-                # 如果连接池不满，创建新连接
                 if self._connection_pool.qsize() < self.max_connections:
-                    # 测试所有服务器，选择最快的
-                    best_server = None
-                    best_speed = float('inf')
-                    
-                    for server in TDX_SERVERS:
-                        speed = self._test_server_speed(server)
-                        if speed < best_speed:
-                            best_speed = speed
-                            best_server = server
-                    
-                    if best_server and best_speed < self.timeout * 3:
+                    api = self._create_connection()
+                    if api is not None:
                         try:
-                            api = TdxHq_API(heartbeat=False)
-                            api.connect(best_server["ip"], best_server["port"], time_out=self.timeout*2)
                             self._connection_pool.put(api)
                         except Exception:
-                            pass
-                
-                # 定期清理和重新测试连接
+                            try:
+                                api.disconnect()
+                            except Exception:
+                                pass
                 time.sleep(self.test_interval)
-                
             except Exception:
-                time.sleep(5)  # 发生异常时等待一段时间
-    
+                time.sleep(5)
+
     def get_connection(self):
-        """从连接池获取一个连接"""
         try:
             if not self._connection_pool.empty():
                 return self._connection_pool.get_nowait()
-            else:
-                # 如果没有可用连接，立即启动工作线程尝试创建连接
-                Timer(0, self._connection_worker_thread).start()
-                # 等待一段时间获取连接
-                time.sleep(0.1)
-                return self._connection_pool.get_nowait() if not self._connection_pool.empty() else None
+            api = self._create_connection()
+            return api
         except Exception:
             return None
-    
+
     def return_connection(self, api):
-        """归还连接到连接池"""
         try:
             if api and not self._connection_pool.full():
                 self._connection_pool.put_nowait(api)
+            else:
+                try:
+                    api.disconnect()
+                except Exception:
+                    pass
         except Exception:
-            pass
-    
-    def close_all(self):
-        """关闭所有连接"""
-        while not self._connection_pool.empty():
             try:
-                api = self._connection_pool.get_nowait()
                 api.disconnect()
             except Exception:
                 pass
 
+    def close_all(self):
+        while not self._connection_pool.empty():
+            try:
+                api = self._connection_pool.get_nowait()
+                try:
+                    api.disconnect()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
 # 全局连接池实例
-tdx_connection_pool = TDXConnectionPool(max_connections=5, timeout=2)
+tdx_connection_pool = TDXConnectionPool(max_connections=5, timeout=2, default_server=TDX_SERVERS[0])
 
 class TDXClient:
     def __init__(self):
-        self.connected = True  # 连接池模式下总是连接状态
+        self.connected = True
         self.current_server = None
+        self._cache_dir = os.path.join(os.path.dirname(__file__), "cache")
+        self._blocks_cache = None
+        self._industries_cache = None
+    
+    def connect(self, server_config: Dict[str, Any]) -> bool:
+        self.current_server = server_config
+        try:
+            tdx_connection_pool.set_server(server_config)
+            return True
+        except Exception:
+            return False
     
     def _with_connection(self, func, *args, **kwargs):
-        """使用连接池执行操作"""
-        api = tdx_connection_pool.get_connection()
-        if not api:
-            # 如果无法获取连接，尝试创建临时连接
-            try:
-                temp_api = TdxHq_API()
-                # 尝试连接最快的服务器
-                for server in TDX_SERVERS:
-                    try:
-                        if temp_api.connect(server["ip"], server["port"]):
-                            result = func(temp_api, *args, **kwargs)
-                            temp_api.disconnect()
-                            return result
-                    except Exception:
-                        continue
-                return None
-            except Exception:
-                return None
-        
+        api = None
+        created = False
         try:
-            result = func(api, *args, **kwargs)
-            return result
+            api = tdx_connection_pool.get_connection()
+            created = api is None
+            if created:
+                api = TdxHq_API()
+                server = tdx_connection_pool.server
+                ok = False
+                try:
+                    ok = api.connect(server["ip"], server["port"])
+                except Exception:
+                    ok = False
+                if not ok:
+                    try:
+                        api.disconnect()
+                    except Exception:
+                        pass
+                    return None
+            return func(api, *args, **kwargs)
         except Exception as e:
             print(f"操作执行失败: {e}")
             return None
         finally:
-            tdx_connection_pool.return_connection(api)
+            try:
+                if api is not None:
+                    if created:
+                        api.disconnect()
+                    else:
+                        tdx_connection_pool.return_connection(api)
+            except Exception:
+                pass
     
     def ensure_connected(self) -> bool:
         """确保连接状态"""
         return True  # 连接池模式下总是返回True
     
     def get_market_list(self):
-        """获取市场列表"""
-        # 由于pytdx没有直接的get_market_list方法，我们返回模拟的市场列表
         return [
             {"market": 0, "name": "深圳市场"},
             {"market": 1, "name": "上海市场"}
         ]
     
+    def _parse_symbol(self, symbol: str):
+        s = symbol.lower()
+        market = 1 if s.startswith("sh") else 0
+        code = s.replace("sh", "").replace("sz", "")
+        return market, code
+
+    def _json_safe_value(self, v):
+        try:
+            if isinstance(v, float):
+                if np.isnan(v) or np.isinf(v):
+                    return None
+                return v
+            if isinstance(v, (list, tuple)):
+                return [self._json_safe_value(x) for x in v]
+            if isinstance(v, dict):
+                return {k: self._json_safe_value(val) for k, val in v.items()}
+            return v
+        except Exception:
+            return v
+
+    def _json_safe_records(self, records):
+        try:
+            if isinstance(records, pd.DataFrame):
+                df = records.replace([np.inf, -np.inf], None)
+                df = df.where(pd.notnull(df), None)
+                return df.to_dict("records")
+            if isinstance(records, list):
+                return [self._json_safe_value(r) for r in records]
+            if isinstance(records, dict):
+                return self._json_safe_value(records)
+            return records
+        except Exception:
+            return records
+
+    def _enrich_xdxr(self, records: List[Dict[str, Any]]):
+        cat_map = {
+            1: "除权除息",
+            2: "送股",
+            3: "配股",
+            4: "现金红利",
+            5: "股本变化",
+            6: "其他"
+        }
+        enriched = []
+        for r in records:
+            y = r.get("year")
+            m = r.get("month")
+            d = r.get("day")
+            if r.get("date") is None and all(v is not None for v in [y, m, d]):
+                try:
+                    r["date"] = f"{int(y):04d}-{int(m):02d}-{int(d):02d}"
+                except Exception:
+                    r["date"] = f"{y}-{m}-{d}"
+            cat = r.get("category")
+            if r.get("category_meaning") is None:
+                r["category_meaning"] = cat_map.get(cat, f"类别{cat}" if cat is not None else "类别未知")
+            enriched.append(r)
+        return enriched
+
     def get_instrument_info(self, symbol: str):
-        """获取股票基本信息"""
         def _get_instrument_info(api, symbol):
-            # 解析市场代码和股票代码
-            market = 0  # 默认深圳
-            if symbol.startswith('sh') or symbol.startswith('6'):
-                market = 1  # 上海
-            
-            code = symbol.replace('sh', '').replace('sz', '')
-            
-            # 由于 get_security_list 返回 None，我们使用其他方式获取股票信息
-            # 尝试通过实时行情获取基本信息
-            quotes = api.get_security_quotes([(market, code)])
-            
+            market, code = self._parse_symbol(symbol)
+            try:
+                info = api.get_instrument_info(market, code)
+            except Exception:
+                info = None
+            if info is not None:
+                try:
+                    return {
+                        "code": getattr(info, "code", code),
+                        "name": getattr(info, "name", f"股票{code}"),
+                        "market": market,
+                        "full_code": symbol
+                    }
+                except Exception:
+                    pass
+            try:
+                quotes = api.get_security_quotes([(market, code)])
+            except Exception:
+                quotes = None
             if quotes and len(quotes) > 0:
-                quote = quotes[0]
-                # 从行情数据中提取基本信息
-                stock_name = f"股票{code}"  # 默认名称
-                
-                # 尝试从行情数据中获取更多信息
+                q = quotes[0]
                 return {
-                    'code': code,
-                    'name': stock_name,
-                    'market': market,
-                    'full_code': symbol,
-                    'price': quote.get('price', 0),
-                    'last_close': quote.get('last_close', 0)
+                    "code": q.get("code", code) if isinstance(q, dict) else code,
+                    "name": q.get("name", f"股票{code}") if isinstance(q, dict) else f"股票{code}",
+                    "market": market,
+                    "full_code": symbol
                 }
-            
-            # 如果实时行情也失败，返回基本结构
             return {
-                'code': code,
-                'name': f"股票{code}",
-                'market': market,
-                'full_code': symbol
+                "code": code,
+                "name": f"股票{code}",
+                "market": market,
+                "full_code": symbol
             }
-        
         return self._with_connection(_get_instrument_info, symbol)
     
     def get_security_bars(self, symbol: str, period: int, count: int):
-        """获取K线数据"""
         def _get_security_bars(api, symbol, period, count):
-            market = 0  # 深圳
-            if symbol.startswith('sh') or symbol.startswith('6'):
-                market = 1  # 上海
-            
-            code = symbol.replace('sh', '').replace('sz', '')
-            bars = api.get_security_bars(period, market, code, 0, count)
-            
-            if bars:
-                df = pd.DataFrame(bars)
-                df['datetime'] = pd.to_datetime(df['datetime'])
-                return df.to_dict('records')
-            return []
-        
+            market, code = self._parse_symbol(symbol)
+            category = period
+            data = api.get_security_bars(category, market, code, 0, count)
+            if (data is None or len(data) == 0) and period == 9:
+                try:
+                    data = api.get_security_bars(4, market, code, 0, count)
+                except Exception:
+                    data = None
+            if data is None:
+                return []
+            try:
+                df = api.to_df(data)
+            except Exception:
+                df = pd.DataFrame(data)
+            return self._json_safe_records(df)
         return self._with_connection(_get_security_bars, symbol, period, count)
     
     def get_security_quotes(self, symbols: List[str]):
-        """获取实时行情"""
         def _get_security_quotes(api, symbols):
-            market_codes = []
-            for symbol in symbols:
-                market = 0  # 深圳
-                if symbol.startswith('sh') or symbol.startswith('6'):
-                    market = 1  # 上海
-                code = symbol.replace('sh', '').replace('sz', '')
-                market_codes.append((market, code))
-            
-            quotes = api.get_security_quotes(market_codes)
-            return quotes
-        
+            req = [self._parse_symbol(s) for s in symbols]
+            data = api.get_security_quotes(req)
+            if data is None:
+                return []
+            try:
+                df = api.to_df(data)
+                return self._json_safe_records(df)
+            except Exception:
+                return self._json_safe_records(data)
         return self._with_connection(_get_security_quotes, symbols)
     
 
 
     def get_finance_info(self, symbol: str):
-        """获取财务信息"""
         def _get_finance_info(api, symbol):
-            market = 0  # 深圳
-            if symbol.startswith('sh') or symbol.startswith('6'):
-                market = 1  # 上海
-            
-            code = symbol.replace('sh', '').replace('sz', '')
-            finance_info = api.get_finance_info(market, code)
-            
-            if finance_info:
-                # 将财务信息转换为字典格式
-                finance_dict = {}
-                for i, item in enumerate(finance_info):
-                    finance_dict[f'field_{i}'] = item
-                return finance_dict
-            return None
-        
+            market, code = self._parse_symbol(symbol)
+            data = api.get_finance_info(market, code)
+            return self._json_safe_records(data) if isinstance(data, pd.DataFrame) else self._json_safe_value(data)
         return self._with_connection(_get_finance_info, symbol)
 
     def get_company_report(self, symbol: str, report_type: int = 0):
-        """获取公司报告文件"""
         def _get_company_report(api, symbol, report_type):
-            market = 0  # 深圳
-            if symbol.startswith('sh') or symbol.startswith('6'):
-                market = 1  # 上海
-            
-            code = symbol.replace('sh', '').replace('sz', '')
-            report_data = api.get_report_file(market, code, report_type)
-            return report_data
-        
+            return None
         return self._with_connection(_get_company_report, symbol, report_type)
 
     def get_batch_security_quotes(self, symbols: List[str], batch_size: int = 80):
-        """批量获取实时行情数据"""
         def _get_batch_security_quotes(api, symbols, batch_size):
             all_quotes = []
-            
-            # 分批处理
             for i in range(0, len(symbols), batch_size):
                 batch_symbols = symbols[i:i + batch_size]
-                
-                market_codes = []
-                for symbol in batch_symbols:
-                    market = 0  # 深圳
-                    if symbol.startswith('sh') or symbol.startswith('6'):
-                        market = 1  # 上海
-                    code = symbol.replace('sh', '').replace('sz', '')
-                    market_codes.append((market, code))
-                
-                quotes = api.get_security_quotes(market_codes)
-                if quotes:
-                    all_quotes.extend(quotes)
-            
+                req = [self._parse_symbol(s) for s in batch_symbols]
+                data = api.get_security_quotes(req)
+                if data is None:
+                    continue
+                try:
+                    df = api.to_df(data)
+                    all_quotes.extend(self._json_safe_records(df))
+                except Exception:
+                    all_quotes.extend(self._json_safe_records(data))
             return all_quotes
-        
         return self._with_connection(_get_batch_security_quotes, symbols, batch_size)
     
     def get_batch_security_bars(self, symbols: List[str], period: int = 9, count: int = 100, batch_size: int = 10):
-        """批量获取K线数据"""
         def _get_batch_security_bars(api, symbols, period, count, batch_size):
             all_bars = {}
-            
-            # 分批处理
+            category = period
             for i in range(0, len(symbols), batch_size):
                 batch_symbols = symbols[i:i + batch_size]
-                
                 for symbol in batch_symbols:
-                    market = 0  # 深圳
-                    if symbol.startswith('sh') or symbol.startswith('6'):
-                        market = 1  # 上海
-                    
-                    code = symbol.replace('sh', '').replace('sz', '')
-                    bars = api.get_security_bars(period, market, code, 0, count)
-                    
-                    if bars:
-                        df = pd.DataFrame(bars)
-                        df['datetime'] = pd.to_datetime(df['datetime'])
-                        all_bars[symbol] = df.to_dict('records')
-                    else:
-                        all_bars[symbol] = []
-            
+                    market, code = self._parse_symbol(symbol)
+                    data = api.get_security_bars(category, market, code, 0, count)
+                    if data is None:
+                        if period == 9:
+                            try:
+                                data = api.get_security_bars(4, market, code, 0, count)
+                            except Exception:
+                                data = None
+                        if data is None:
+                            all_bars[symbol] = []
+                            continue
+                    try:
+                        df = api.to_df(data)
+                        all_bars[symbol] = self._json_safe_records(df)
+                    except Exception:
+                        all_bars[symbol] = self._json_safe_records(data)
             return all_bars
-        
         return self._with_connection(_get_batch_security_bars, symbols, period, count, batch_size)
 
     def get_stock_blocks(self):
-        """获取股票板块数据"""
         def _get_stock_blocks(api):
             try:
-                # 获取各种板块数据
-                block_types = [
-                    ("block.dat", "yb"),      # 一般板块
-                    ("block_fg.dat", "fg"),  # 风格板块
-                    ("block_gn.dat", "gn"),  # 概念板块
-                    ("block_zs.dat", "zs"),  # 指数板块
-                    ("hkblock.dat", "hk"),   # 港股板块
-                    ("jjblock.dat", "jj")    # 基金板块
-                ]
-                
-                all_blocks = []
-                
-                for block_file, block_type in block_types:
+                print("开始获取板块数据")
+            except Exception:
+                pass
+            try:
+                if isinstance(self._blocks_cache, list) and len(self._blocks_cache) > 0:
+                    return self._blocks_cache
+            except Exception:
+                pass
+            def _ensure_cache_dir():
+                try:
+                    os.makedirs(self._cache_dir, exist_ok=True)
+                except Exception:
+                    pass
+            def _load_cache(name, max_age=86400):
+                try:
+                    _ensure_cache_dir()
+                    p = os.path.join(self._cache_dir, name)
+                    if not os.path.exists(p):
+                        return None
+                    with open(p, "r", encoding="utf-8") as f:
+                        obj = json.load(f)
+                    ts = obj.get("cached_at")
+                    data = obj.get("data")
+                    if not ts or data is None:
+                        return None
                     try:
-                        block_data = api.get_and_parse_block_info(block_file)
-                        if block_data:
-                            # 使用api.to_df()转换数据，与QATdx.py保持一致
-                            df = api.to_df(block_data)
-                            df['block_type'] = block_type
-                            df['block_file'] = block_file
-                            
-                            # 处理不同的数据结构
-                            if 'stock_list' in df.columns:
-                                # 展开stock_list中的多个股票代码
-                                expanded_blocks = []
-                                for _, row in df.iterrows():
-                                    if row['stock_list']:
-                                        for code in row['stock_list']:
-                                            expanded_blocks.append({
-                                                'code': code,
-                                                'block_name': row['blockname'],
-                                                'block_type': block_type,
-                                                'block_file': block_file
-                                            })
-                                all_blocks.extend(expanded_blocks)
-                            elif 'code' in df.columns:
-                                # 直接使用code字段
-                                for _, row in df.iterrows():
-                                    if row['code']:
-                                        all_blocks.append({
-                                            'code': row['code'],
-                                            'block_name': row['blockname'],
-                                            'block_type': block_type,
-                                            'block_file': block_file
-                                        })
-                            else:
-                                print(f"警告: {block_file} 中的板块数据格式异常，无法找到stock_list或code字段")
-                                continue
-                    except Exception as e:
-                        # 特别处理hkblock和jjblock的解析错误
-                        error_msg = str(e)
-                        if 'unpack' in error_msg and 'buffer' in error_msg:
-                            print(f"警告: {block_file} 解析失败，可能是二进制格式不匹配或数据损坏: {error_msg}")
-                        elif 'struct' in error_msg:
-                            print(f"警告: {block_file} 结构解析错误: {error_msg}")
-                        else:
-                            print(f"获取板块数据 {block_file} 失败: {error_msg}")
-                        continue
-                
-                return all_blocks
-                
-            except Exception as e:
-                print(f"获取板块数据失败: {e}")
+                        t0 = datetime.fromisoformat(ts)
+                        if (datetime.now() - t0).total_seconds() > max_age:
+                            return None
+                    except Exception:
+                        return None
+                    return data
+                except Exception:
+                    return None
+            def _save_cache(name, data):
+                try:
+                    _ensure_cache_dir()
+                    p = os.path.join(self._cache_dir, name)
+                    with open(p, "w", encoding="utf-8") as f:
+                        json.dump({"cached_at": datetime.now().isoformat(), "data": data}, f, ensure_ascii=False)
+                except Exception:
+                    pass
+            cached = _load_cache("blocks.json")
+            if isinstance(cached, list) and len(cached) > 0:
+                try:
+                    self._blocks_cache = cached
+                except Exception:
+                    pass
+                return cached
+            files = [
+                ("block.dat", "yb"),
+                ("block_fg.dat", "fg"),
+                ("block_gn.dat", "gn"),
+                ("block_zs.dat", "zs"),
+                ("hkblock.dat", "hk"),
+                ("jjblock.dat", "jj"),
+            ]
+            dfs = []
+            for fn, bt in files:
+                try:
+                    df = api.to_df(api.get_and_parse_block_info(fn)).assign(blocktype=bt)
+                    dfs.append(df)
+                except Exception:
+                    pass
+            if len(dfs) == 0:
                 return []
-        
+            try:
+                data = pd.concat(dfs, sort=False)
+            except Exception:
+                return []
+            try:
+                data["code"] = data["code"].astype(str)
+            except Exception:
+                pass
+            def _is_a_share(c: str):
+                try:
+                    return (
+                        c.startswith("000") or c.startswith("001") or c.startswith("002") or
+                        c.startswith("003") or c.startswith("200") or c.startswith("300") or
+                        c.startswith("301") or c.startswith("600") or c.startswith("601") or
+                        c.startswith("603") or c.startswith("605") or c.startswith("688")
+                    ) and len(c) == 6
+                except Exception:
+                    return False
+            try:
+                data = data[data["code"].apply(_is_a_share)]
+                data = data.drop_duplicates(subset=["blockname", "code", "blocktype"], keep="first")
+            except Exception:
+                pass
+            blocks = []
+            try:
+                if "blockname" in data.columns and "code" in data.columns:
+                    for (bn, bt), group in data.groupby(["blockname", "blocktype"], as_index=False):
+                        stocks = sorted(set(group["code"].tolist()))
+                        blocks.append({"blockname": bn, "blocktype": bt, "stocks": stocks})
+            except Exception:
+                return []
+            try:
+                self._blocks_cache = blocks
+                _save_cache("blocks.json", blocks)
+            except Exception:
+                pass
+            return blocks
         return self._with_connection(_get_stock_blocks)
     
     def get_industry_info(self):
-        """获取行业信息"""
         def _get_industry_info(api):
             try:
-                # 获取行业代码对照表
-                incon_content = api.get_block_dat_ver_up("incon.dat")
-                if incon_content:
-                    incon_content = incon_content.decode("GB18030")
-                    incon_block_info = self._parse_block_name_info(incon_content)
-                else:
-                    incon_block_info = None
-                
-                # 获取行业数据
-                industry_data = self._get_tdx_industry_data(incon_block_info)
-                
-                if industry_data is not None and len(industry_data) > 0:
-                    return industry_data
-                else:
-                    # 返回默认行业信息作为fallback
-                    return [
-                        {"industry_code": "HY001", "industry_name": "银行", "stock_count": 50},
-                        {"industry_code": "HY002", "industry_name": "证券", "stock_count": 45},
-                        {"industry_code": "HY003", "industry_name": "保险", "stock_count": 30},
-                        {"industry_code": "HY004", "industry_name": "房地产", "stock_count": 120},
-                        {"industry_code": "HY005", "industry_name": "医药", "stock_count": 200}
-                    ]
-                
-            except Exception as e:
-                print(f"获取行业信息失败: {e}")
+                print("开始获取行业数据")
+            except Exception:
+                pass
+            try:
+                if isinstance(self._industries_cache, list) and len(self._industries_cache) > 0:
+                    return self._industries_cache
+            except Exception:
+                pass
+            def _ensure_cache_dir():
+                try:
+                    os.makedirs(self._cache_dir, exist_ok=True)
+                except Exception:
+                    pass
+            def _load_cache(name, max_age=86400):
+                try:
+                    _ensure_cache_dir()
+                    p = os.path.join(self._cache_dir, name)
+                    if not os.path.exists(p):
+                        return None
+                    with open(p, "r", encoding="utf-8") as f:
+                        obj = json.load(f)
+                    ts = obj.get("cached_at")
+                    data = obj.get("data")
+                    if not ts or data is None:
+                        return None
+                    try:
+                        t0 = datetime.fromisoformat(ts)
+                        if (datetime.now() - t0).total_seconds() > max_age:
+                            return None
+                    except Exception:
+                        return None
+                    return data
+                except Exception:
+                    return None
+            def _save_cache(name, data):
+                try:
+                    _ensure_cache_dir()
+                    p = os.path.join(self._cache_dir, name)
+                    with open(p, "w", encoding="utf-8") as f:
+                        json.dump({"cached_at": datetime.now().isoformat(), "data": data}, f, ensure_ascii=False)
+                except Exception:
+                    pass
+            cached = _load_cache("industries.json")
+            if isinstance(cached, list) and len(cached) > 0:
+                try:
+                    self._industries_cache = cached
+                except Exception:
+                    pass
+                return cached
+            incon_block_info = None
+            try:
+                content = api.get_block_dat_ver_up("incon.dat")
+                if content:
+                    try:
+                        text = content.decode("GB18030")
+                        incon_block_info = self._parse_block_name_info(text)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            data = self._get_tdx_industry_data(incon_block_info=incon_block_info)
+            if not data:
                 return []
-        
+            try:
+                rs = [{
+                    "code": r.get("industry_code"),
+                    "name": r.get("industry_name"),
+                    "stocks": r.get("stocks", []),
+                    "count": r.get("stock_count", 0)
+                } for r in data]
+                try:
+                    self._industries_cache = rs
+                    _save_cache("industries.json", rs)
+                except Exception:
+                    pass
+                return rs
+            except Exception:
+                return []
         return self._with_connection(_get_industry_info)
     
     def _parse_block_name_info(self, incon_content: str):
@@ -512,11 +628,9 @@ class TDXClient:
             return pd.DataFrame()
     
     def _get_tdx_industry_data(self, incon_block_info=None):
-        """获取通达信行业数据"""
         try:
-            folder = None
+            folder = self._download_tdx_file(False if isinstance(incon_block_info, pd.DataFrame) else True)
             if not isinstance(incon_block_info, pd.DataFrame):
-                folder = self._download_tdx_file(False if isinstance(incon_block_info, pd.DataFrame) else True)
                 incon_path = os.path.join(folder, "incon.dat")
                 if not os.path.exists(incon_path):
                     zhb = os.path.join(folder, "zhb.zip")
@@ -549,69 +663,81 @@ class TDXClient:
                 shutil.rmtree(folder, ignore_errors=True)
 
     def get_xdxr_info(self, symbol: str):
-        """获取除权除息信息"""
         def _get_xdxr_info(api):
-            try:
-                # 获取市场代码
-                market_code = 1 if symbol.startswith(('0', '3', '8', '9')) else 0
-                
-                # 获取除权除息数据
-                xdxr_data = api.get_xdxr_info(market_code, symbol)
-                
-                if xdxr_data:
-                    # 转换为DataFrame格式
-                    df = pd.DataFrame(xdxr_data)
-                    
-                    # 定义类别映射
-                    category_map = {
-                        '1': '除权除息', '2': '送配股上市', '3': '非流通股上市', '4': '未知股本变动',
-                        '5': '股本变化', '6': '增发新股', '7': '股份回购', '8': '增发新股上市', 
-                        '9': '转配股上市', '10': '可转债上市', '11': '扩缩股', '12': '非流通股缩股',
-                        '13': '送认购权证', '14': '送认沽权证'
-                    }
-                    
-                    # 处理数据
-                    if len(df) >= 1:
-                        df = df.assign(
-                            date=pd.to_datetime(df[['year', 'month', 'day']]),
-                            category_meaning=df['category'].astype(str).map(category_map),
-                            code=symbol
-                        ).drop(['year', 'month', 'day'], axis=1)
-                        
-                        # 重命名列
-                        df = df.rename(columns={
-                            'panhouliutong': 'liquidity_after',
-                            'panqianliutong': 'liquidity_before',
-                            'houzongguben': 'shares_after',
-                            'qianzongguben': 'shares_before'
-                        })
-                        
-                        # 转换为字典列表返回
-                        result = df.to_dict('records')
-                        
-                        # 处理日期格式
-                        for item in result:
-                            if 'date' in item and hasattr(item['date'], 'strftime'):
-                                item['date'] = item['date'].strftime('%Y-%m-%d')
-                        
-                        return result
-                    else:
-                        return []
-                else:
-                    return []
-                    
-            except Exception as e:
-                print(f"获取除权除息信息失败: {e}")
+            market, code = self._parse_symbol(symbol)
+            data = api.get_xdxr_info(market, code)
+            if data is None:
                 return []
-        
+            try:
+                df = api.to_df(data)
+                rs = self._json_safe_records(df)
+                return self._enrich_xdxr(rs)
+            except Exception:
+                rs = self._json_safe_records(data)
+                return self._enrich_xdxr(rs if isinstance(rs, list) else [rs])
         return self._with_connection(_get_xdxr_info)
 
 # 全局TDX客户端实例
 tdx_client = TDXClient()
 
+@app.on_event("startup")
+async def preload_caches():
+    try:
+        cache_dir = os.path.join(os.path.dirname(__file__), "cache")
+        blocks_path = os.path.join(cache_dir, "blocks.json")
+        industries_path = os.path.join(cache_dir, "industries.json")
+        if not os.path.exists(blocks_path):
+            asyncio.get_event_loop().run_in_executor(executor, tdx_client.get_stock_blocks)
+        if not os.path.exists(industries_path):
+            asyncio.get_event_loop().run_in_executor(executor, tdx_client.get_industry_info)
+    except Exception:
+        pass
+
 @app.get("/")
 async def root():
     return {"message": "TDX数据源管理服务", "version": "1.0.0"}
+
+try:
+    from mcp.server.fastmcp import FastMCP, Context
+    mcp_server = FastMCP(title="TDX MCP")
+    @mcp_server.tool("get_quote")
+    async def mcp_get_quote(symbol: str, ctx: Context):
+        rs = await asyncio.get_event_loop().run_in_executor(executor, tdx_client.get_security_quotes, [symbol])
+        return rs[0] if rs else {}
+    @mcp_server.tool("get_quotes")
+    async def mcp_get_quotes(symbols: List[str], ctx: Context):
+        rs = await asyncio.get_event_loop().run_in_executor(executor, tdx_client.get_security_quotes, symbols)
+        return rs or []
+    @mcp_server.tool("get_history")
+    async def mcp_get_history(symbol: str, period: int, count: int, ctx: Context):
+        rs = await asyncio.get_event_loop().run_in_executor(executor, tdx_client.get_security_bars, symbol, period, count)
+        return rs or []
+    @mcp_server.tool("get_history_batch")
+    async def mcp_get_history_batch(symbols: List[str], period: int, count: int, batch_size: int = 10, ctx: Context = None):
+        rs = await asyncio.get_event_loop().run_in_executor(executor, tdx_client.get_batch_security_bars, symbols, period, count, batch_size)
+        return rs or {}
+    @mcp_server.tool("get_finance")
+    async def mcp_get_finance(symbol: str, ctx: Context):
+        rs = await asyncio.get_event_loop().run_in_executor(executor, tdx_client.get_finance_info, symbol)
+        return rs or {}
+    @mcp_server.tool("get_stock_info")
+    async def mcp_get_stock_info(symbol: str, ctx: Context):
+        rs = await asyncio.get_event_loop().run_in_executor(executor, tdx_client.get_instrument_info, symbol)
+        return rs or {}
+    @mcp_server.tool("get_blocks")
+    async def mcp_get_blocks(ctx: Context):
+        rs = await asyncio.get_event_loop().run_in_executor(executor, tdx_client.get_stock_blocks)
+        return rs or []
+    @mcp_server.tool("get_industries")
+    async def mcp_get_industries(ctx: Context):
+        rs = await asyncio.get_event_loop().run_in_executor(executor, tdx_client.get_industry_info)
+        return rs or []
+    app.mount("/mcp", mcp_server.http_app())
+except Exception as _mcp_err:
+    try:
+        print(f"MCP 未启用: {_mcp_err}")
+    except Exception:
+        pass
 
 @app.get("/api/servers")
 async def get_servers():
@@ -674,6 +800,12 @@ async def get_batch_quotes(symbols: List[str]):
     
     return {"quotes": quotes}
 
+class BatchHistoryRequest(BaseModel):
+    symbols: List[str]
+    period: int = 9
+    count: int = 100
+    batch_size: int = 10
+
 @app.post("/api/quotes/batch")
 async def get_large_batch_quotes(symbols: List[str], batch_size: int = 80):
     """批量获取实时行情（支持大量股票）"""
@@ -687,24 +819,19 @@ async def get_large_batch_quotes(symbols: List[str], batch_size: int = 80):
     return {"quotes": quotes, "count": len(quotes) if quotes else 0}
 
 @app.post("/api/history/batch")
-async def get_batch_history_data(
-    symbols: List[str],
-    period: int = 9,  # 9: 日线, 0: 5分钟, 1: 15分钟等
-    count: int = 100,
-    batch_size: int = 10
-):
+async def get_batch_history_data(request: BatchHistoryRequest):
     """批量获取历史K线数据"""
-    if len(symbols) > 100:
+    if len(request.symbols) > 100:
         raise HTTPException(status_code=400, detail="一次最多查询100只股票")
     
-    if count > 1000:
+    if request.count > 1000:
         raise HTTPException(status_code=400, detail="一次最多获取1000条数据")
     
     bars = await asyncio.get_event_loop().run_in_executor(
-        executor, tdx_client.get_batch_security_bars, symbols, period, count, batch_size
+        executor, tdx_client.get_batch_security_bars, request.symbols, request.period, request.count, request.batch_size
     )
     
-    return {"symbols": symbols, "period": period, "data": bars}
+    return {"symbols": request.symbols, "period": request.period, "data": bars}
 
 @app.get("/api/history/{symbol}")
 async def get_history_data(
@@ -772,6 +899,10 @@ async def get_stock_blocks():
     if blocks is None:
         raise HTTPException(status_code=404, detail="板块数据获取失败")
     
+    try:
+        print(f"板块数据条数: {len(blocks) if blocks else 0}")
+    except Exception:
+        pass
     return {"blocks": blocks, "count": len(blocks) if blocks else 0}
 
 @app.get("/api/industries")
@@ -784,6 +915,10 @@ async def get_industries():
     if industries is None:
         raise HTTPException(status_code=404, detail="行业数据获取失败")
     
+    try:
+        print(f"行业数据条数: {len(industries) if industries else 0}")
+    except Exception:
+        pass
     return {"industries": industries, "count": len(industries) if industries else 0}
 
 @app.get("/api/xdxr/{symbol}")
@@ -796,7 +931,8 @@ async def get_xdxr_info(symbol: str):
     if xdxr_info is None:
         raise HTTPException(status_code=404, detail="除权除息信息获取失败")
     
-    return {"symbol": symbol, "xdxr_info": xdxr_info, "count": len(xdxr_info) if xdxr_info else 0}
+    safe_info = tdx_client._json_safe_records(xdxr_info)
+    return {"symbol": symbol, "xdxr_info": safe_info, "count": len(safe_info) if safe_info else 0}
 
 @app.get("/api/status")
 async def get_service_status():
@@ -805,10 +941,10 @@ async def get_service_status():
         "connected": tdx_client.connected,
         "current_server": tdx_client.current_server,
         "connection_pool": {
-            "size": len(tdx_client.connection_pool.available_connections) if hasattr(tdx_client, 'connection_pool') else 0,
-            "max_size": tdx_client.connection_pool.max_size if hasattr(tdx_client, 'connection_pool') else 0,
-            "available": len(tdx_client.connection_pool.available_connections) if hasattr(tdx_client, 'connection_pool') else 0,
-            "in_use": len(tdx_client.connection_pool.in_use_connections) if hasattr(tdx_client, 'connection_pool') else 0
+            "size": tdx_connection_pool._connection_pool.qsize(),
+            "max_size": tdx_connection_pool.max_connections,
+            "available": tdx_connection_pool._connection_pool.qsize(),
+            "in_use": 0
         },
         "timestamp": datetime.now().isoformat()
     }
