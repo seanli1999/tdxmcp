@@ -156,11 +156,11 @@ def test_batch_history_data():
         response = requests.post(
             f"{BASE_URL}/api/history/batch",
             headers={"Content-Type": "application/json"},
-            data=json.dumps({
+            json={
                 "symbols": symbols,
                 "period": 9,  # 日线
                 "count": 5    # 5条数据
-            })
+            }
         )
         data = response.json()
         print(f"批量历史数据结果: {len(data['data'])} 只股票")
