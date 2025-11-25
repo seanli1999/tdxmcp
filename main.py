@@ -6,6 +6,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, date
 import pandas as pd
 from pytdx.hq import TdxHq_API
+import socket
 import numpy as np
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -964,19 +965,32 @@ async def test_server(payload: TestPayload):
         srv = _resolve()
         if not srv:
             return {"success": False, "error": "未找到服务器"}
-        api = TdxHq_API()
+        tcp_ok = False
+        tcp_err = None
         t0 = time.time()
+        try:
+            with socket.create_connection((srv["ip"], int(srv["port"])), timeout=2):
+                tcp_ok = True
+        except Exception as e:
+            tcp_err = str(e)
+        tcp_ms = int((time.time() - t0) * 1000)
+        if not tcp_ok:
+            return {"success": False, "latency_ms": tcp_ms, "server": srv, "reason": "tcp_connect_failed", "error": tcp_err}
+        api = TdxHq_API()
+        t1 = time.time()
         ok = False
+        tdx_err = None
         try:
             ok = api.connect(srv["ip"], int(srv["port"]))
-        except Exception:
+        except Exception as e:
+            tdx_err = str(e)
             ok = False
         try:
             api.disconnect()
         except Exception:
             pass
-        ms = int((time.time() - t0) * 1000)
-        return {"success": bool(ok), "latency_ms": ms, "server": srv}
+        ms = int((time.time() - t1) * 1000)
+        return {"success": bool(ok), "latency_ms": ms, "server": srv, "reason": "ok" if ok else "tdx_handshake_failed", "error": tdx_err}
     rs = await asyncio.get_event_loop().run_in_executor(executor, _test)
     return rs
 
@@ -1116,9 +1130,9 @@ function srvRow(server, isCurrent){
       const st=tr.querySelector('[data-role="status"]');
       if(st){
         st.className='status '+(j.success?'ok':'fail');
-        st.textContent=j.success?('成功 '+j.latency_ms+'ms'):'失败';
+        st.textContent=j.success?('成功 '+j.latency_ms+'ms'):`失败 ${j.reason||''}`;
       }
-      msg.textContent=j.success?`测试成功，延迟 ${j.latency_ms}ms`:'测试失败，无法连接';
+      msg.textContent=j.success?`测试成功，延迟 ${j.latency_ms}ms`:`测试失败：${j.reason||'无法连接'}`;
     }catch(e){msg.textContent='测试失败';}
   };
   tr.querySelector('[data-act="connect"]').onclick=async()=>{
