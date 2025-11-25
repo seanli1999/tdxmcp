@@ -10,7 +10,7 @@ import pandas as pd
 from datetime import datetime
 
 class TDXClientExample:
-    def __init__(self, base_url="http://localhost:8000"):
+    def __init__(self, base_url="http://localhost:6999"):
         self.base_url = base_url
     
     def get_service_info(self):

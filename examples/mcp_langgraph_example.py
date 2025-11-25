@@ -2,7 +2,7 @@ import requests
 from typing import Any, Dict, TypedDict
 
 class HTTPMCPClient:
-    def __init__(self, base_url: str = "http://localhost:8000/mcp", timeout: int = 15):
+    def __init__(self, base_url: str = "http://localhost:6999/mcp", timeout: int = 15):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.session = requests.Session()
@@ -58,7 +58,7 @@ class State(TypedDict):
     symbol: str
     quote: Dict[str, Any]
 
-client = HTTPMCPClient("http://localhost:8000/mcp")
+client = HTTPMCPClient("http://localhost:6999/mcp")
 
 def node_get_quote(state: State) -> State:
     q = client.call_tool("get_quote", {"symbol": state["symbol"]})

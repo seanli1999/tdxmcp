@@ -10,7 +10,7 @@ import pandas as pd
 from typing import Dict, List, Any
 import time
 
-BASE_URL = "http://localhost:8000"
+BASE_URL = "http://localhost:6999"
 
 def print_section(title):
     """打印章节标题"""
@@ -201,7 +201,7 @@ def main():
         
     except Exception as e:
         print(f"示例程序执行出错: {e}")
-        print("请确保TDX数据服务正在运行 (http://localhost:8000)")
+        print("请确保TDX数据服务正在运行 (http://localhost:6999)")
 
 if __name__ == "__main__":
     main()

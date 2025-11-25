@@ -1381,7 +1381,7 @@ async def get_service_status():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=6999)
     def reset_pool(self):
         try:
             while not self._connection_pool.empty():

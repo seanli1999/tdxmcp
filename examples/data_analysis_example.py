@@ -11,7 +11,7 @@ import numpy as np
 from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 
-BASE_URL = "http://localhost:8000"
+BASE_URL = "http://localhost:6999"
 
 def get_api_data(endpoint: str, params: Dict = None) -> Dict:
     """通用API数据获取函数"""
@@ -208,7 +208,7 @@ def main():
         
     except Exception as e:
         print(f"分析程序执行出错: {e}")
-        print("请确保TDX数据服务正在运行 (http://localhost:8000)")
+        print("请确保TDX数据服务正在运行 (http://localhost:6999)")
         print("并已安装必要的依赖: pip install pandas matplotlib numpy")
 
 if __name__ == "__main__":

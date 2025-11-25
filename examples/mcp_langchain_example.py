@@ -3,7 +3,7 @@ import asyncio
 from typing import Any, Dict, List
 
 class HTTPMCPClient:
-    def __init__(self, base_url: str = "http://localhost:8000/mcp", timeout: int = 15):
+    def __init__(self, base_url: str = "http://localhost:6999/mcp", timeout: int = 15):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.session = requests.Session()
@@ -103,7 +103,7 @@ def build_langchain_tools(client: HTTPMCPClient):
     return tools
 
 if __name__ == "__main__":
-    client = HTTPMCPClient("http://localhost:8000/mcp")
+    client = HTTPMCPClient("http://localhost:6999/mcp")
     try:
         result = client.call_tool("get_quote", {"symbol": "sz000001"})
         print(result)

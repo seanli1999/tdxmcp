@@ -30,14 +30,14 @@ python main.py
 python start.py
 
 # 方式3: 使用uvicorn
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn main:app --host 0.0.0.0 --port 6999 --reload
 ```
 
-服务启动后访问: http://localhost:8000
+服务启动后访问: http://localhost:6999
 
 ## API接口文档
 
-启动服务后访问: http://localhost:8000/docs
+启动服务后访问: http://localhost:6999/docs
 
 ### 主要接口
 
@@ -92,17 +92,17 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 ### 获取实时行情
 ```bash
-curl "http://localhost:8000/api/quote/sh600000"
+curl "http://localhost:6999/api/quote/sh600000"
 ```
 
 ### 获取历史K线
 ```bash
-curl "http://localhost:8000/api/history/sz000001?period=9&count=50"
+curl "http://localhost:6999/api/history/sz000001?period=9&count=50"
 ```
 
 ### 批量查询
 ```bash
-curl -X POST "http://localhost:8000/api/quotes" \
+curl -X POST "http://localhost:6999/api/quotes" \
   -H "Content-Type: application/json" \
   -d '["sh600000", "sz000001", "bj430000"]'
 ```
@@ -110,10 +110,10 @@ curl -X POST "http://localhost:8000/api/quotes" \
 ### 获取财务数据
 ```bash
 # 获取财务信息
-curl "http://localhost:8000/api/finance/sh600000"
+curl "http://localhost:6999/api/finance/sh600000"
 
 # 获取公司报告
-curl "http://localhost:8000/api/report/sz000001?report_type=0"
+curl "http://localhost:6999/api/report/sz000001?report_type=0"
 ```
 
 ## 配置说明

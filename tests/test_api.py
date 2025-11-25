@@ -9,7 +9,7 @@ import json
 import time
 from typing import Dict, Any
 
-BASE_URL = "http://localhost:8000"
+BASE_URL = "http://localhost:6999"
 
 def test_connection():
     """测试服务连接"""

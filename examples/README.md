@@ -95,7 +95,7 @@ python quick_test.py
 
 ## 注意事项
 
-1. 服务必须运行在 `http://localhost:8000`
+1. 服务必须运行在 `http://localhost:6999`
 2. 数据分析示例需要安装额外的Python包：
    ```bash
    pip install pandas matplotlib numpy
