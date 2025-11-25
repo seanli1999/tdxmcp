@@ -1,18 +1,19 @@
 # TDX数据源管理服务
 
-基于pytdx的股票数据API服务，提供实时行情、历史数据、基本信息和新闻数据。
+基于 pytdx 的股票数据服务，提供 REST API 与 MCP 工具接口，支持实时行情、历史数据、财务信息、板块与行业数据等。
 
 ## 功能特性
 
-- ✅ 实时行情数据获取
-- ✅ 历史K线数据查询  
-- ✅ 股票基本信息查询
-- ✅ **财务数据查询**
-- ✅ 公司报告文件获取
-- ✅ 批量数据查询支持
-- ✅ 多服务器自动切换
-- ✅ RESTful API接口
-- ✅ 跨域请求支持
+- ✅ 实时行情与批量行情
+- ✅ 历史 K 线与批量历史
+- ✅ 股票基本信息与市场列表
+- ✅ 财务数据与公司报告
+- ✅ 板块与行业数据、除权除息
+- ✅ 多服务器管理：测试、选择、保存
+- ✅ RESTful API + 文档（Swagger/OpenAPI）
+- ✅ MCP（Model Context Protocol）工具流接口 `/mcp`
+- ✅ 跨域（CORS）支持
+- ✅ Docker 一键打包部署
 
 ## 安装依赖
 
@@ -29,50 +30,106 @@ python main.py
 # 方式2: 使用启动脚本
 python start.py
 
-# 方式3: 使用uvicorn
+# 方式3: 使用 uvicorn（推荐开发）
 uvicorn main:app --host 0.0.0.0 --port 6999 --reload
 ```
 
-服务启动后访问: http://localhost:6999
+- 服务地址：`http://localhost:6999`
+- API 文档：`http://localhost:6999/docs`
+- 配置管理页面：`http://localhost:6999/config`
 
-## API接口文档
+![配置管理](./image.png)
 
-启动服务后访问: http://localhost:6999/docs
+## 服务器管理接口
 
-### 主要接口
+- `GET /api/servers` 获取服务器列表与当前项
+- `POST /api/servers` 保存服务器列表（可携带 `current_index`）
+- `POST /api/server/select` 选择当前服务器
+- `GET /api/server/current` 查询当前服务器
+- `POST /api/server/test` 测试服务器连通性（返回 `reason: tcp_connect_failed/tdx_handshake_failed`）
+- `POST /api/server/config` 以单一服务器覆盖配置并设为当前
+- `GET /api/server/saved` 读取最近一次保存的配置
 
-#### 1. 服务状态
-- `GET /` - 服务基本信息
-- `GET /api/status` - 服务连接状态
-- `GET /api/servers` - 可用服务器列表
+持久化位置：`cache/servers.json`（Docker 下挂载到 `/app/cache`）
 
-#### 2. 实时行情
-- `GET /api/quote/{symbol}` - 获取单个股票实时行情
-- `POST /api/quotes` - 批量获取实时行情
+## 主要 API 接口
 
-#### 3. 历史数据  
-- `GET /api/history/{symbol}` - 获取K线数据
-  - 参数: `period` (周期), `count` (数量)
+- 基础：`GET /`、`GET /api/status`、`GET /api/servers`
+- 实时：`GET /api/quote/{symbol}`、`POST /api/quotes`、`POST /api/quotes/batch`
+- 历史：`GET /api/history/{symbol}`、`POST /api/history/batch`
+- 信息：`GET /api/stock/{symbol}`、`GET /api/markets`
+- 财务：`GET /api/finance/{symbol}`、`GET /api/report/{symbol}`
+- 新闻：`GET /api/news`
+- 板块与行业：`GET /api/blocks`、`GET /api/industries`
+- 除权除息：`GET /api/xdxr/{symbol}`
 
-#### 4. 基本信息
-- `GET /api/stock/{symbol}` - 获取股票基本信息
-- `GET /api/markets` - 获取市场列表
+## MCP 工具接口
 
-#### 5. 财务数据
-- `GET /api/finance/{symbol}` - 获取财务信息
-- `GET /api/report/{symbol}` - 获取公司报告文件
-  - 参数: `report_type` (报告类型, 0-默认)
+- 路径：`http://localhost:6999/mcp`
+- 已注册工具（示例）：`get_quote`、`get_quotes`、`get_history`、`get_history_batch`、`get_finance`、`get_stock_info`、`get_blocks`、`get_industries`
+- 示例使用：
+  - `examples/mcp_langchain_example.py`
+  - `examples/mcp_langgraph_example.py`
 
-#### 6. 新闻数据
-- `GET /api/news` - 获取新闻信息
+## 使用示例
+
+```bash
+# 获取实时行情
+curl "http://localhost:6999/api/quote/sh600000"
+
+# 获取历史 K 线（日线：period=9）
+curl "http://localhost:6999/api/history/sz000001?period=9&count=50"
+
+# 批量实时行情
+curl -X POST "http://localhost:6999/api/quotes" \
+  -H "Content-Type: application/json" \
+  -d '["sh600000", "sz000001", "bj430000"]'
+
+# 批量历史 K 线
+curl -X POST "http://localhost:6999/api/history/batch" \
+  -H "Content-Type: application/json" \
+  -d '{"symbols":["sh600000","sz000001"],"period":9,"count":50}'
+
+# 测试服务器连通性
+curl -X POST "http://localhost:6999/api/server/test" \
+  -H "Content-Type: application/json" \
+  -d '{"ip":"129.204.230.128","port":7709}'
+```
+
+## Docker 部署
+
+```bash
+# 构建镜像
+docker build -t tdxmcp:1.0 .
+
+# 运行容器（宿主 6999 -> 容器 6999）
+docker run -d --name tdxmcp -p 6999:6999 tdxmcp:1.0
+
+# 持久化服务器列表到宿主机（推荐）
+docker run -d --name tdxmcp -p 6999:6999 -v %CD%/cache:/app/cache tdxmcp:1.0
+
+# 自定义端口（通过环境变量 PORT）
+docker run -d --name tdxmcp -e PORT=8080 -p 8080:8080 tdxmcp:1.0
+```
+
+镜像说明：
+- 入口：`uvicorn main:app --host 0.0.0.0 --port ${PORT:-6999}`
+- 暴露端口：`6999`
+- 卷：`/app/cache`（保存 `servers.json`）
+
+## 配置说明
+
+- 配置页面：`/config` 可视化管理服务器列表（测试、选择、保存）
+- 服务器列表持久化：`cache/servers.json`
+- 文本配置：`config.py` 可调整服务器默认列表、参数限制与市场映射
 
 ## 股票代码格式
 
-- 上海股票: `sh600000` 或 `600000`
-- 深圳股票: `sz000001` 或 `000001`
-- 北京股票: `bj830000` 或 `830000`
+- 上海：`sh600000` 或 `600000`
+- 深圳：`sz000001` 或 `000001`
+- 北京：`bj830000` 或 `830000`
 
-## K线周期参数
+## K 线周期参数
 
 | 参数值 | 周期说明 |
 |--------|----------|
@@ -88,52 +145,26 @@ uvicorn main:app --host 0.0.0.0 --port 6999 --reload
 | 9 | 日线 |
 | 10 | 季度线 |
 
-## 使用示例
-
-### 获取实时行情
-```bash
-curl "http://localhost:6999/api/quote/sh600000"
-```
-
-### 获取历史K线
-```bash
-curl "http://localhost:6999/api/history/sz000001?period=9&count=50"
-```
-
-### 批量查询
-```bash
-curl -X POST "http://localhost:6999/api/quotes" \
-  -H "Content-Type: application/json" \
-  -d '["sh600000", "sz000001", "bj430000"]'
-```
-
-### 获取财务数据
-```bash
-# 获取财务信息
-curl "http://localhost:6999/api/finance/sh600000"
-
-# 获取公司报告
-curl "http://localhost:6999/api/report/sz000001?report_type=0"
-```
-
-## 配置说明
-
-修改 `config.py` 文件可以:
-- 添加/修改TDX服务器配置
-- 调整API参数限制
-- 配置市场代码映射
-
 ## 注意事项
 
-1. 确保网络可以访问TDX服务器
-2. 批量查询建议不超过100只股票
-3. 历史数据查询数量建议不超过1000条
-4. 服务会自动重连失败的服务器
+1. 确保网络可访问 TDX 服务器端口（通常为 `TCP/7709`）
+2. 批量查询建议不超过 100 支股票（可通过 MCP/REST 分批）
+3. 历史数据建议不超过 1000 条/次（可分页或分批）
+4. 连接失败时可切换服务器或使用测试接口诊断（`reason` 字段）
+5. 跨域已启用，前端可直接调用 REST 接口
+
+## 使用声明与免责声明
+
+- 本项目仅用于学习与研究目的，不构成任何投资建议。
+- 服务返回的数据来源于第三方，真实性、准确性、完整性不作保证。
+- 使用者应遵守相关法律法规与数据使用规范，因使用本项目造成的任何后果由使用者自行承担。
 
 ## 开发扩展
 
-服务基于FastAPI框架开发，可以轻松扩展:
-- 添加新的数据接口
-- 实现数据缓存
-- 添加认证机制
-- 集成数据库存储
+- 基于 FastAPI，可扩展新接口与认证
+- 可加入缓存与数据库存储
+- 提供示例与测试脚本（见 `examples/` 与 `tests/`）
+
+## 许可协议
+
+- 本项目采用 MIT 开源许可协议，详见仓库根目录 `LICENSE` 文件。
