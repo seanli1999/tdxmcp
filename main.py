@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
@@ -117,6 +118,17 @@ class TDXConnectionPool:
                     pass
             except Exception:
                 pass
+
+    def reset_pool(self):
+        try:
+            while not self._connection_pool.empty():
+                api = self._connection_pool.get_nowait()
+                try:
+                    api.disconnect()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
 # 全局连接池实例
 tdx_connection_pool = TDXConnectionPool(max_connections=5, timeout=2, default_server=TDX_SERVERS[0])
@@ -684,6 +696,36 @@ tdx_client = TDXClient()
 async def preload_caches():
     try:
         cache_dir = os.path.join(os.path.dirname(__file__), "cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        servers_path = os.path.join(cache_dir, "servers.json")
+        current = None
+        servers = None
+        if os.path.exists(servers_path):
+            try:
+                with open(servers_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        servers = data.get("servers")
+                        current = data.get("current")
+            except Exception:
+                pass
+        if not servers:
+            servers = TDX_SERVERS
+            try:
+                with open(servers_path, "w", encoding="utf-8") as f:
+                    json.dump({"servers": servers, "current": servers[0]}, f, ensure_ascii=False)
+                current = servers[0]
+            except Exception:
+                current = servers[0]
+        if not current and servers:
+            current = servers[0]
+        if current:
+            try:
+                tdx_connection_pool.set_server(current)
+                tdx_connection_pool.reset_pool()
+                tdx_client.current_server = current
+            except Exception:
+                pass
         blocks_path = os.path.join(cache_dir, "blocks.json")
         industries_path = os.path.join(cache_dir, "industries.json")
         if not os.path.exists(blocks_path):
@@ -699,7 +741,7 @@ async def root():
 
 try:
     from mcp.server.fastmcp import FastMCP, Context
-    mcp_server = FastMCP(title="TDX MCP")
+    mcp_server = FastMCP("TDX MCP")
     @mcp_server.tool("get_quote")
     async def mcp_get_quote(symbol: str, ctx: Context):
         rs = await asyncio.get_event_loop().run_in_executor(executor, tdx_client.get_security_quotes, [symbol])
@@ -732,7 +774,7 @@ try:
     async def mcp_get_industries(ctx: Context):
         rs = await asyncio.get_event_loop().run_in_executor(executor, tdx_client.get_industry_info)
         return rs or []
-    app.mount("/mcp", mcp_server.http_app())
+    app.mount("/mcp", mcp_server.streamable_http_app())
 except Exception as _mcp_err:
     try:
         print(f"MCP 未启用: {_mcp_err}")
@@ -741,7 +783,15 @@ except Exception as _mcp_err:
 
 @app.get("/api/servers")
 async def get_servers():
-    """获取可用的TDX服务器列表"""
+    cache_dir = os.path.join(os.path.dirname(__file__), "cache")
+    servers_path = os.path.join(cache_dir, "servers.json")
+    try:
+        if os.path.exists(servers_path):
+            with open(servers_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return {"servers": data.get("servers", TDX_SERVERS), "current": data.get("current", tdx_client.current_server)}
+    except Exception:
+        pass
     return {"servers": TDX_SERVERS, "current": tdx_client.current_server}
 
 @app.post("/api/connect")
@@ -755,6 +805,372 @@ async def connect_server(server_index: int = 0):
     )
     
     return {"success": success, "server": TDX_SERVERS[server_index] if success else None}
+
+class ServerConfig(BaseModel):
+    ip: str
+    port: int
+    name: Optional[str] = None
+
+@app.post("/api/server/config")
+async def set_server_config(cfg: ServerConfig):
+    if cfg.port < 1 or cfg.port > 65535:
+        raise HTTPException(status_code=400, detail="端口不合法")
+    server = {"ip": cfg.ip, "port": cfg.port, "name": cfg.name or "自定义"}
+    def _apply():
+        tdx_connection_pool.set_server(server)
+        tdx_connection_pool.reset_pool()
+        tdx_client.current_server = server
+        try:
+            cache_dir = os.path.join(os.path.dirname(__file__), "cache")
+            os.makedirs(cache_dir, exist_ok=True)
+            servers_path = os.path.join(cache_dir, "servers.json")
+            data = {"servers": [server], "current": server}
+            try:
+                if os.path.exists(servers_path):
+                    with open(servers_path, "r", encoding="utf-8") as f:
+                        old = json.load(f)
+                        if isinstance(old, dict) and isinstance(old.get("servers"), list):
+                            lst = old.get("servers")
+                            found = False
+                            for s in lst:
+                                if s.get("ip") == server["ip"] and s.get("port") == server["port"]:
+                                    s["name"] = server["name"]
+                                    found = True
+                                    break
+                            if not found:
+                                lst.append(server)
+                            data = {"servers": lst, "current": server}
+            except Exception:
+                pass
+            with open(servers_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+        except Exception:
+            pass
+        return True
+    success = await asyncio.get_event_loop().run_in_executor(executor, _apply)
+    return {"success": success, "server": server}
+
+@app.get("/api/server/current")
+async def get_current_server():
+    return {"current": tdx_client.current_server}
+
+class ServersPayload(BaseModel):
+    servers: List[Dict[str, Any]]
+    current_index: Optional[int] = None
+
+@app.post("/api/servers")
+async def set_servers(payload: ServersPayload):
+    if not payload.servers:
+        raise HTTPException(status_code=400, detail="服务器列表为空")
+    cache_dir = os.path.join(os.path.dirname(__file__), "cache")
+    servers_path = os.path.join(cache_dir, "servers.json")
+    def _apply():
+        data = {"servers": payload.servers, "current": None}
+        old_current = None
+        try:
+            if os.path.exists(servers_path):
+                with open(servers_path, "r", encoding="utf-8") as f:
+                    old = json.load(f)
+                    if isinstance(old, dict):
+                        old_current = old.get("current")
+        except Exception:
+            pass
+        idx = payload.current_index if payload.current_index is not None else None
+        if isinstance(idx, int) and 0 <= idx < len(payload.servers):
+            data["current"] = payload.servers[idx]
+        else:
+            chosen = None
+            try:
+                if isinstance(old_current, dict):
+                    for s in payload.servers:
+                        if s.get("ip") == old_current.get("ip") and int(s.get("port")) == int(old_current.get("port")):
+                            chosen = s
+                            break
+            except Exception:
+                chosen = None
+            data["current"] = chosen or payload.servers[0]
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            with open(servers_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+        except Exception:
+            pass
+        try:
+            tdx_connection_pool.set_server(data["current"])
+            tdx_connection_pool.reset_pool()
+            tdx_client.current_server = data["current"]
+        except Exception:
+            pass
+        return True
+    ok = await asyncio.get_event_loop().run_in_executor(executor, _apply)
+    return {"success": ok}
+
+class SelectPayload(BaseModel):
+    index: int
+
+@app.post("/api/server/select")
+async def select_server(payload: SelectPayload):
+    cache_dir = os.path.join(os.path.dirname(__file__), "cache")
+    servers_path = os.path.join(cache_dir, "servers.json")
+    def _apply():
+        try:
+            with open(servers_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                servers = data.get("servers", [])
+                if not servers:
+                    return False
+                idx = payload.index
+                if idx < 0 or idx >= len(servers):
+                    idx = 0
+                current = servers[idx]
+                data["current"] = current
+            with open(servers_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            tdx_connection_pool.set_server(current)
+            tdx_connection_pool.reset_pool()
+            tdx_client.current_server = current
+            return True
+        except Exception:
+            return False
+    ok = await asyncio.get_event_loop().run_in_executor(executor, _apply)
+    return {"success": ok}
+
+class TestPayload(BaseModel):
+    ip: Optional[str] = None
+    port: Optional[int] = None
+    index: Optional[int] = None
+
+@app.post("/api/server/test")
+async def test_server(payload: TestPayload):
+    def _resolve():
+        srv = None
+        if payload.ip and payload.port:
+            srv = {"ip": payload.ip, "port": int(payload.port)}
+        else:
+            try:
+                cache_dir = os.path.join(os.path.dirname(__file__), "cache")
+                servers_path = os.path.join(cache_dir, "servers.json")
+                with open(servers_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    servers = data.get("servers", [])
+                    idx = payload.index or 0
+                    if idx < 0 or idx >= len(servers):
+                        idx = 0
+                    srv = servers[idx]
+            except Exception:
+                pass
+        return srv
+    def _test():
+        srv = _resolve()
+        if not srv:
+            return {"success": False, "error": "未找到服务器"}
+        api = TdxHq_API()
+        t0 = time.time()
+        ok = False
+        try:
+            ok = api.connect(srv["ip"], int(srv["port"]))
+        except Exception:
+            ok = False
+        try:
+            api.disconnect()
+        except Exception:
+            pass
+        ms = int((time.time() - t0) * 1000)
+        return {"success": bool(ok), "latency_ms": ms, "server": srv}
+    rs = await asyncio.get_event_loop().run_in_executor(executor, _test)
+    return rs
+
+@app.get("/api/server/saved")
+async def get_saved_server():
+    try:
+        cache_dir = os.path.join(os.path.dirname(__file__), "cache")
+        cfg_path = os.path.join(cache_dir, "server_config.json")
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                return {"saved": json.load(f)}
+    except Exception:
+        pass
+    return {"saved": None}
+
+@app.get("/config", response_class=HTMLResponse)
+async def config_page():
+    return """
+<!DOCTYPE html>
+<html lang=\"zh-CN\">
+<head>
+<meta charset=\"utf-8\"/>
+<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"/>
+<title>TDX服务器配置</title>
+<style>
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto;max-width:1200px;margin:36px auto;padding:0 24px}
+.card{border:1px solid #e5e7eb;border-radius:14px;padding:24px;box-shadow:0 1px 2px rgba(0,0,0,0.04)}
+.toolbar{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+table{width:100%;border-collapse:separate;border-spacing:0 12px}
+th{font-weight:600;color:#111827;padding:0 8px}
+td{padding:12px 8px;vertical-align:middle}
+input{width:100%;padding:8px 10px;border:1px solid #d1d5db;border-radius:8px;font-size:14px}
+input.port{width:100px}
+th:nth-child(3),td:nth-child(3){width:120px}
+button{background:#2563eb;color:#fff;border:none;border-radius:8px;padding:8px 12px;font-size:14px;cursor:pointer}
+button.secondary{background:#6b7280}
+button.ghost{background:#374151}
+button:disabled{background:#9ca3af}
+.msg{margin-top:12px;font-size:13px;color:#374151}
+.cell-name{display:flex;align-items:center;gap:10px}
+.badge{display:inline-block;background:#10b981;color:#fff;border-radius:999px;padding:2px 8px;font-size:12px}
+.ops{display:flex;flex-direction:row;gap:8px;align-items:center;justify-content:flex-end}
+.status{font-size:12px;padding:2px 8px;border-radius:999px}
+.status.ok{background:#10b981;color:#fff}
+.status.fail{background:#ef4444;color:#fff}
+</style>
+</head>
+<body>
+<h2>TDX服务器配置</h2>
+<div class=\"card\" style=\"display:none\">
+  <div class=\"row\">
+    <div style=\"flex:1\"><label>IP地址</label><input id=\"ip\" placeholder=\"例如 129.204.230.128\"></div>
+    <div style=\"width:140px\"><label>端口</label><input id=\"port\" type=\"number\" value=\"7709\"></div>
+  </div>
+  <div class=\"row\">
+    <div style=\"flex:1\"><label>名称</label><input id=\"name\" placeholder=\"自定义\"></div>
+  </div>
+  <div class=\"grid\">
+    <button id=\"save\">保存并连接</button>
+    <button id=\"load\" style=\"background:#6b7280\">读取当前</button>
+    <button id=\"loadSaved\" style=\"background:#374151\">读取本地</button>
+  </div>
+  <div id=\"msg\" class=\"msg\"></div>
+</div>
+<div class=\"card\" style=\"margin-top:16px\">
+  <div class=\"toolbar\">
+    <button id=\"listLoad\">加载列表</button>
+    <button id=\"listAdd\" class=\"secondary\">添加行</button>
+    <button id=\"listSave\" class=\"ghost\">保存列表</button>
+  </div>
+  <table id=\"srvTbl\" style=\"width:100%;margin-top:8px;border-collapse:collapse\">
+    <thead><tr><th>名称</th><th>IP</th><th>端口</th><th>操作</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <div id=\"listMsg\" class=\"msg\"></div>
+</div>
+<script>
+const msg=document.getElementById('listMsg');
+document.getElementById('load').onclick=async()=>{
+  msg.textContent='读取中…';
+  try{
+    const r=await fetch('/api/server/current');
+    const j=await r.json();
+    if(j.current){
+      document.getElementById('ip').value=j.current.ip||'';
+      document.getElementById('port').value=j.current.port||7709;
+      document.getElementById('name').value=j.current.name||'';
+      msg.textContent='已加载当前配置';
+    }else{msg.textContent='暂无当前配置';}
+  }catch(e){msg.textContent='读取失败';}
+};
+document.getElementById('loadSaved').onclick=async()=>{
+  msg.textContent='读取中…';
+  try{
+    const r=await fetch('/api/server/saved');
+    const j=await r.json();
+    if(j.saved){
+      document.getElementById('ip').value=j.saved.ip||'';
+      document.getElementById('port').value=j.saved.port||7709;
+      document.getElementById('name').value=j.saved.name||'';
+      msg.textContent='已加载本地配置';
+    }else{msg.textContent='暂无本地配置';}
+  }catch(e){msg.textContent='读取失败';}
+};
+document.getElementById('save').onclick=async()=>{
+  msg.textContent='保存中…';
+  const ip=document.getElementById('ip').value.trim();
+  const port=Number(document.getElementById('port').value);
+  const name=document.getElementById('name').value.trim();
+  if(!ip||!port){msg.textContent='请填写IP和端口';return}
+  try{
+    const r=await fetch('/api/server/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip,port,name})});
+    const j=await r.json();
+    if(j.success){msg.textContent='已保存并切换到: '+j.server.ip+':'+j.server.port;}
+    else{msg.textContent='保存失败';}
+  }catch(e){msg.textContent='请求失败';}
+};
+const srvTBody=document.getElementById('srvTbl').querySelector('tbody');
+function srvRow(server, isCurrent){
+  const tr=document.createElement('tr');
+  tr.innerHTML=`
+    <td><div class="cell-name"><input value="${server.name||''}">${isCurrent?'<span class="badge">当前</span>':''}</div></td>
+    <td><input value="${server.ip||''}"></td>
+    <td><input class="port" type="number" value="${server.port||7709}"></td>
+    <td><div class="ops">
+      <button data-act="test">测试</button><span class="status" data-role="status"></span>
+      <button data-act="connect" class="secondary" ${isCurrent?'disabled':''}>${isCurrent?'当前':'连接'}</button>
+      <button data-act="remove" class="ghost">删除</button>
+    </div></td>`;
+  tr.querySelector('[data-act="test"]').onclick=async()=>{
+    msg.textContent='测试中…';
+    const ip=tr.children[1].querySelector('input').value.trim();
+    const port=Number(tr.children[2].querySelector('input').value);
+    try{
+      const r=await fetch('/api/server/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip,port})});
+      const j=await r.json();
+      const st=tr.querySelector('[data-role="status"]');
+      if(st){
+        st.className='status '+(j.success?'ok':'fail');
+        st.textContent=j.success?('成功 '+j.latency_ms+'ms'):'失败';
+      }
+      msg.textContent=j.success?`测试成功，延迟 ${j.latency_ms}ms`:'测试失败，无法连接';
+    }catch(e){msg.textContent='测试失败';}
+  };
+  tr.querySelector('[data-act="connect"]').onclick=async()=>{
+    msg.textContent='连接中…';
+    try{
+      const idx=Array.from(srvTBody.children).indexOf(tr);
+      const r=await fetch('/api/server/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index: idx})});
+      const j=await r.json();
+      msg.textContent=j.success?'已切换到该服务器':'切换失败';
+      if(j.success){loadList();}
+    }catch(e){msg.textContent='切换失败';}
+  };
+  tr.querySelector('[data-act="remove"]').onclick=()=>{
+    srvTBody.removeChild(tr);
+  };
+  return tr;
+}
+async function loadList(){
+  msg.textContent='读取中…';
+  try{
+    const r=await fetch('/api/servers');
+    const j=await r.json();
+    const list=j.servers||[];
+    const cur=j.current||{};
+    srvTBody.innerHTML='';
+    list.forEach(s=>srvTBody.appendChild(srvRow(s, !!cur && s.ip===cur.ip && s.port===cur.port)));
+    msg.textContent='已加载';
+  }catch(e){msg.textContent='读取失败';}
+}
+document.getElementById('listLoad').onclick=loadList;
+document.getElementById('listAdd').onclick=()=>{
+  srvTBody.appendChild(srvRow({name:'自定义',ip:'',port:7709}, false));
+};
+document.getElementById('listSave').onclick=async()=>{
+  msg.textContent='保存中…';
+  const list=Array.from(srvTBody.children).map(tr=>({
+    name: tr.children[0].querySelector('input').value.trim(),
+    ip: tr.children[1].querySelector('input').value.trim(),
+    port: Number(tr.children[2].querySelector('input').value)
+  })).filter(x=>x.ip && x.port);
+  try{
+    const r=await fetch('/api/servers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({servers:list})});
+    const j=await r.json();
+    msg.textContent=j.success?'已保存并应用':'保存失败';
+    if(j.success){loadList();}
+  }catch(e){msg.textContent='保存失败';}
+};
+loadList();
+</script>
+</body>
+</html>
+"""
 
 @app.get("/api/markets")
 async def get_markets():
@@ -952,3 +1368,13 @@ async def get_service_status():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+    def reset_pool(self):
+        try:
+            while not self._connection_pool.empty():
+                api = self._connection_pool.get_nowait()
+                try:
+                    api.disconnect()
+                except Exception:
+                    pass
+        except Exception:
+            pass
