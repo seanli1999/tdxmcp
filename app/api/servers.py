@@ -251,3 +251,19 @@ async def get_saved_server():
         pass
     return {"saved": None}
 
+
+@router.get("/status")
+async def get_status():
+    """获取服务状态和连接池详情"""
+    pool_status = tdx_connection_pool.get_status()
+
+    return {
+        "connected": True,
+        "current_server": pool_status.get("current_server"),
+        "connection_pool": {
+            "max_connections_per_server": pool_status.get("max_connections_per_server"),
+            "retry_times": pool_status.get("retry_times"),
+            "servers": pool_status.get("servers", [])
+        }
+    }
+

@@ -35,39 +35,42 @@ class TDXClient:
             return False
     
     def _with_connection(self, func, *args, **kwargs):
-        """使用连接池执行操作"""
+        """
+        使用连接池执行操作，支持自动重试和服务器切换
+
+        连接池会自动处理：
+        1. 从池中获取可用连接
+        2. 连接失败时自动重试
+        3. 重试失败后自动切换到其他服务器
+        4. 记录服务器健康状态
+        """
         api = None
-        created = False
+        server = None
         try:
-            api = tdx_connection_pool.get_connection()
-            created = api is None
-            if created:
-                api = TdxHq_API()
-                server = tdx_connection_pool.server
-                ok = False
-                try:
-                    ok = api.connect(server["ip"], server["port"])
-                except Exception:
-                    ok = False
-                if not ok:
-                    try:
-                        api.disconnect()
-                    except Exception:
-                        pass
-                    return None
+            # 从连接池获取连接（带重试和自动切换）
+            api, server = tdx_connection_pool.get_connection()
+
+            if api is None:
+                print("[TDXClient] 无法获取连接，所有服务器不可用")
+                return None
+
+            # 更新当前服务器信息
+            if server:
+                self.current_server = server
+
+            # 执行操作
             return func(api, *args, **kwargs)
+
         except Exception as e:
-            print(f"操作执行失败: {e}")
+            print(f"[TDXClient] 操作执行失败: {e}")
+            # 标记当前连接的服务器失败
+            if server:
+                tdx_connection_pool._mark_server_failed(server["ip"])
             return None
         finally:
-            try:
-                if api is not None:
-                    if created:
-                        api.disconnect()
-                    else:
-                        tdx_connection_pool.return_connection(api)
-            except Exception:
-                pass
+            # 归还连接到池
+            if api is not None:
+                tdx_connection_pool.return_connection(api, server)
     
     def ensure_connected(self) -> bool:
         """确保连接状态"""
