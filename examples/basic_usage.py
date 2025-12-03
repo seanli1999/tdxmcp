@@ -37,12 +37,28 @@ class TDXClientExample:
         """获取单个股票行情"""
         print(f"\n=== {symbol} 实时行情 ===")
         response = requests.get(f"{self.base_url}/api/quote/{symbol}")
-        quote = response.json()['quote']
         
+        if response.status_code != 200:
+            print(f"获取行情失败: {response.json().get('detail', '未知错误')}")
+            return None
+            
+        data = response.json()
+        if 'quote' not in data:
+            print("返回数据格式错误")
+            return None
+            
+        quote = data['quote']
         print(f"股票代码: {quote.get('code', 'N/A')}")
         print(f"股票名称: {quote.get('name', 'N/A')}")
         print(f"当前价格: {quote.get('price', 0):.2f}")
-        print(f"涨跌幅: {quote.get('percent', 0):.2f}%")
+        # 计算涨跌幅: (当前价 - 昨收价) / 昨收价 * 100
+        last_close = quote.get('last_close', 0)
+        current_price = quote.get('price', 0)
+        if last_close and last_close != 0:
+            percent_change = ((current_price - last_close) / last_close) * 100
+            print(f"涨跌幅: {percent_change:.2f}%")
+        else:
+            print(f"涨跌幅: 0.00%")
         print(f"成交量: {quote.get('vol', 0)}")
         
         return quote
@@ -62,7 +78,15 @@ class TDXClientExample:
         
         for i, quote in enumerate(quotes):
             if quote:
-                print(f"{i+1}. {quote.get('code', 'N/A')}: {quote.get('price', 0):.2f} ({quote.get('percent', 0):.2f}%)")
+                # 计算涨跌幅: (当前价 - 昨收价) / 昨收价 * 100
+                last_close = quote.get('last_close', 0)
+                current_price = quote.get('price', 0)
+                if last_close and last_close != 0:
+                    percent_change = ((current_price - last_close) / last_close) * 100
+                    change_sign = "+" if percent_change >= 0 else ""
+                    print(f"{i+1}. {quote.get('code', 'N/A')}: {current_price:.2f} ({change_sign}{percent_change:.2f}%)")
+                else:
+                    print(f"{i+1}. {quote.get('code', 'N/A')}: {current_price:.2f} (0.00%)")
         
         return quotes
     
@@ -87,8 +111,16 @@ class TDXClientExample:
         """获取财务信息"""
         print(f"\n=== {symbol} 财务信息 ===")
         response = requests.get(f"{self.base_url}/api/finance/{symbol}")
-        data = response.json()
         
+        if response.status_code != 200:
+            print(f"获取财务信息失败: {response.json().get('detail', '未知错误')}")
+            return None
+            
+        data = response.json()
+        if 'finance_info' not in data:
+            print("返回数据格式错误")
+            return None
+            
         finance_info = data['finance_info']
         print(f"财务字段数: {len(finance_info)}")
         

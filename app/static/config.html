@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>TDX服务器配置</title>
+<style>
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto;max-width:1200px;margin:36px auto;padding:0 24px}
+.card{border:1px solid #e5e7eb;border-radius:14px;padding:24px;box-shadow:0 1px 2px rgba(0,0,0,0.04)}
+.toolbar{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+table{width:100%;border-collapse:separate;border-spacing:0 12px}
+th{font-weight:600;color:#111827;padding:0 8px}
+td{padding:12px 8px;vertical-align:middle}
+input{width:100%;padding:8px 10px;border:1px solid #d1d5db;border-radius:8px;font-size:14px}
+input.port{width:100px}
+th:nth-child(3),td:nth-child(3){width:120px}
+button{background:#2563eb;color:#fff;border:none;border-radius:8px;padding:8px 12px;font-size:14px;cursor:pointer}
+button.secondary{background:#6b7280}
+button.ghost{background:#374151}
+button:disabled{background:#9ca3af}
+.msg{margin-top:12px;font-size:13px;color:#374151}
+.cell-name{display:flex;align-items:center;gap:10px}
+.badge{display:inline-block;background:#10b981;color:#fff;border-radius:999px;padding:2px 8px;font-size:12px}
+.ops{display:flex;flex-direction:row;gap:8px;align-items:center;justify-content:flex-end}
+.status{font-size:12px;padding:2px 8px;border-radius:999px}
+.status.ok{background:#10b981;color:#fff}
+.status.fail{background:#ef4444;color:#fff}
+</style>
+</head>
+<body>
+<h2>TDX服务器配置</h2>
+<div class="card" style="display:none">
+  <div class="row">
+    <div style="flex:1"><label>IP地址</label><input id="ip" placeholder="例如 129.204.230.128"></div>
+    <div style="width:140px"><label>端口</label><input id="port" type="number" value="7709"></div>
+  </div>
+  <div class="row">
+    <div style="flex:1"><label>名称</label><input id="name" placeholder="自定义"></div>
+  </div>
+  <div class="grid">
+    <button id="save">保存并连接</button>
+    <button id="load" style="background:#6b7280">读取当前</button>
+    <button id="loadSaved" style="background:#374151">读取本地</button>
+  </div>
+  <div id="msg" class="msg"></div>
+</div>
+<div class="card" style="margin-top:16px">
+  <div class="toolbar">
+    <button id="listLoad">加载列表</button>
+    <button id="listAdd" class="secondary">添加行</button>
+    <button id="listSave" class="ghost">保存列表</button>
+  </div>
+  <table id="srvTbl" style="width:100%;margin-top:8px;border-collapse:collapse">
+    <thead><tr><th>名称</th><th>IP</th><th>端口</th><th>操作</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <div id="listMsg" class="msg"></div>
+</div>
+<script>
+const msg=document.getElementById('listMsg');
+document.getElementById('load').onclick=async()=>{
+  msg.textContent='读取中…';
+  try{
+    const r=await fetch('/api/server/current');
+    const j=await r.json();
+    if(j.current){
+      document.getElementById('ip').value=j.current.ip||'';
+      document.getElementById('port').value=j.current.port||7709;
+      document.getElementById('name').value=j.current.name||'';
+      msg.textContent='已加载当前配置';
+    }else{msg.textContent='暂无当前配置';}
+  }catch(e){msg.textContent='读取失败';}
+};
+document.getElementById('loadSaved').onclick=async()=>{
+  msg.textContent='读取中…';
+  try{
+    const r=await fetch('/api/server/saved');
+    const j=await r.json();
+    if(j.saved){
+      document.getElementById('ip').value=j.saved.ip||'';
+      document.getElementById('port').value=j.saved.port||7709;
+      document.getElementById('name').value=j.saved.name||'';
+      msg.textContent='已加载本地配置';
+    }else{msg.textContent='暂无本地配置';}
+  }catch(e){msg.textContent='读取失败';}
+};
+document.getElementById('save').onclick=async()=>{
+  msg.textContent='保存中…';
+  const ip=document.getElementById('ip').value.trim();
+  const port=Number(document.getElementById('port').value);
+  const name=document.getElementById('name').value.trim();
+  if(!ip||!port){msg.textContent='请填写IP和端口';return}
+  try{
+    const r=await fetch('/api/server/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip,port,name})});
+    const j=await r.json();
+    if(j.success){msg.textContent='已保存并切换到: '+j.server.ip+':'+j.server.port;}
+    else{msg.textContent='保存失败';}
+  }catch(e){msg.textContent='请求失败';}
+};
+const srvTBody=document.getElementById('srvTbl').querySelector('tbody');
+function srvRow(server, isCurrent){
+  const tr=document.createElement('tr');
+  tr.innerHTML=`
+    <td><div class="cell-name"><input value="${server.name||''}">${isCurrent?'<span class="badge">当前</span>':''}</div></td>
+    <td><input value="${server.ip||''}"></td>
+    <td><input class="port" type="number" value="${server.port||7709}"></td>
+    <td><div class="ops">
+      <button data-act="test">测试</button><span class="status" data-role="status"></span>
+      <button data-act="connect" class="secondary" ${isCurrent?'disabled':''}>${isCurrent?'当前':'连接'}</button>
+      <button data-act="remove" class="ghost">删除</button>
+    </div></td>`;
+  tr.querySelector('[data-act="test"]').onclick=async()=>{
+    msg.textContent='测试中…';
+    const ip=tr.children[1].querySelector('input').value.trim();
+    const port=Number(tr.children[2].querySelector('input').value);
+    try{
+      const r=await fetch('/api/server/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip,port})});
+      const j=await r.json();
+      const st=tr.querySelector('[data-role="status"]');
+      if(st){
+        st.className='status '+(j.success?'ok':'fail');
+        st.textContent=j.success?('成功 '+j.latency_ms+'ms'):`失败 ${j.reason||''}`;
+      }
+      msg.textContent=j.success?`测试成功，延迟 ${j.latency_ms}ms`:`测试失败：${j.reason||'无法连接'}`;
+    }catch(e){msg.textContent='测试失败';}
+  };
+  tr.querySelector('[data-act="connect"]').onclick=async()=>{
+    msg.textContent='连接中…';
+    try{
+      const idx=Array.from(srvTBody.children).indexOf(tr);
+      const r=await fetch('/api/server/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index: idx})});
+      const j=await r.json();
+      msg.textContent=j.success?'已切换到该服务器':'切换失败';
+      if(j.success){loadList();}
+    }catch(e){msg.textContent='切换失败';}
+  };
+  tr.querySelector('[data-act="remove"]').onclick=()=>{
+    srvTBody.removeChild(tr);
+  };
+  return tr;
+}
+async function loadList(){
+  msg.textContent='读取中…';
+  try{
+    const r=await fetch('/api/servers');
+    const j=await r.json();
+    const list=j.servers||[];
+    const cur=j.current||{};
+    srvTBody.innerHTML='';
+    list.forEach(s=>srvTBody.appendChild(srvRow(s, !!cur && s.ip===cur.ip && s.port===cur.port)));
+    msg.textContent='已加载';
+  }catch(e){msg.textContent='读取失败';}
+}
+document.getElementById('listLoad').onclick=loadList;
+document.getElementById('listAdd').onclick=()=>{
+  srvTBody.appendChild(srvRow({name:'自定义',ip:'',port:7709}, false));
+};
+document.getElementById('listSave').onclick=async()=>{
+  msg.textContent='保存中…';
+  const list=Array.from(srvTBody.children).map(tr=>({
+    name: tr.children[0].querySelector('input').value.trim(),
+    ip: tr.children[1].querySelector('input').value.trim(),
+    port: Number(tr.children[2].querySelector('input').value)
+  })).filter(x=>x.ip && x.port);
+  try{
+    const r=await fetch('/api/servers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({servers:list})});
+    const j=await r.json();
+    msg.textContent=j.success?'已保存并应用':'保存失败';
+    if(j.success){loadList();}
+  }catch(e){msg.textContent='保存失败';}
+};
+loadList();
+</script>
+</body>
+</html>
+

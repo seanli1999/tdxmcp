@@ -9,7 +9,12 @@ import json
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+from typing import Dict, Any
 import matplotlib.pyplot as plt
+
+# 配置中文字体支持
+plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 
 BASE_URL = "http://localhost:6999"
 
@@ -56,12 +61,20 @@ def analyze_stock_performance():
         
         if quote.get('quote'):
             q = quote['quote']
+            # 计算涨跌幅: (当前价 - 昨收价) / 昨收价 * 100
+            last_close = q.get('last_close', 0)
+            current_price = q.get('price', 0)
+            if last_close and last_close != 0:
+                updown_value = ((current_price - last_close) / last_close) * 100
+            else:
+                updown_value = 0
+            
             performance_data.append({
                 'symbol': symbol,
                 'name': q.get('name', symbol),
-                'price': q.get('price', 0),
-                'updown': q.get('updown', 0),
-                'volume': q.get('volume', 0)
+                'price': current_price,
+                'updown': updown_value,
+                'volume': q.get('vol', 0)
             })
     
     if performance_data:

@@ -26,8 +26,14 @@ def get_api_data(endpoint: str, params: Dict = None) -> Dict:
         else:
             response = requests.get(f"{BASE_URL}{endpoint}")
         
-        response.raise_for_status()
-        return response.json()
+        # 检查HTTP状态码
+        if response.status_code != 200:
+            error_detail = response.json().get('detail', '未知错误')
+            print(f"获取 {endpoint} 数据失败: HTTP {response.status_code} - {error_detail}")
+            return {}
+            
+        data = response.json()
+        return data
     except Exception as e:
         print(f"获取 {endpoint} 数据失败: {e}")
         return {}
@@ -40,8 +46,15 @@ def post_api_data(endpoint: str, data: Any) -> Dict:
             headers={"Content-Type": "application/json"},
             data=json.dumps(data)
         )
-        response.raise_for_status()
-        return response.json()
+        
+        # 检查HTTP状态码
+        if response.status_code != 200:
+            error_detail = response.json().get('detail', '未知错误')
+            print(f"提交 {endpoint} 数据失败: HTTP {response.status_code} - {error_detail}")
+            return {}
+            
+        data = response.json()
+        return data
     except Exception as e:
         print(f"提交 {endpoint} 数据失败: {e}")
         return {}
@@ -65,22 +78,41 @@ def example_real_time_data():
     
     # 获取单只股票实时行情
     quote = get_api_data("/api/quote/sz000001")  # 平安银行
-    if quote.get('quote'):
+    if quote and quote.get('quote'):
         q = quote['quote']
         print(f"平安银行实时行情:")
         print(f"  最新价: {q.get('price', 0):.2f}")
-        print(f"  涨跌幅: {q.get('updown', 0):.2f}%")
-        print(f"  成交量: {q.get('volume', 0):,.0f} 手")
+        # 计算涨跌幅: (当前价 - 昨收价) / 昨收价 * 100
+        last_close = q.get('last_close', 0)
+        current_price = q.get('price', 0)
+        if last_close and last_close != 0:
+            percent_change = ((current_price - last_close) / last_close) * 100
+            print(f"  涨跌幅: {percent_change:.2f}%")
+        else:
+            print(f"  涨跌幅: 0.00%")
+        print(f"  成交量: {q.get('vol', 0):,.0f} 手")
+    else:
+        print("获取平安银行行情失败")
     
     # 批量获取实时行情
     symbols = ["sh600036", "sz000002", "sh601318"]  # 招商银行, 万科A, 中国平安
     batch_quotes = post_api_data("/api/quotes", symbols)
     
-    if batch_quotes.get('quotes'):
+    if batch_quotes and batch_quotes.get('quotes'):
         print(f"\n批量行情数据 ({len(batch_quotes['quotes'])} 只股票):")
         for quote in batch_quotes['quotes']:
             if quote:
-                print(f"  {quote.get('code')}: {quote.get('price', 0):.2f} ({quote.get('updown', 0):+.2f}%)")
+                # 计算涨跌幅: (当前价 - 昨收价) / 昨收价 * 100
+                last_close = quote.get('last_close', 0)
+                current_price = quote.get('price', 0)
+                if last_close and last_close != 0:
+                    percent_change = ((current_price - last_close) / last_close) * 100
+                    change_sign = "+" if percent_change >= 0 else ""
+                    print(f"  {quote.get('code')}: {current_price:.2f} ({change_sign}{percent_change:.2f}%)")
+                else:
+                    print(f"  {quote.get('code')}: {current_price:.2f} (0.00%)")
+    else:
+        print("批量获取行情失败")
 
 def example_history_data():
     """历史数据示例"""
@@ -92,7 +124,7 @@ def example_history_data():
     if history.get('data'):
         print(f"平安银行最近10个交易日K线:")
         df = pd.DataFrame(history['data'])
-        print(df[['datetime', 'open', 'close', 'high', 'low', 'volume']].to_string(index=False))
+        print(df[['datetime', 'open', 'close', 'high', 'low', 'vol']].to_string(index=False))
     
     # 批量获取历史数据
     symbols = ["sh600036", "sz000002"]  # 招商银行, 万科A
