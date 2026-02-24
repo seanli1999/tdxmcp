@@ -6,12 +6,13 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Request
 
 from config import TDX_SERVERS
 from app.connection.pool import tdx_connection_pool
 from app.connection.client import tdx_client
 from app.api import servers_router, quotes_router, history_router, blocks_router
-from app.mcp.tools import get_mcp_app
+from app.mcp.tools import get_mcp_app, get_mcp_server
 from app.services.cache import CacheService
 
 # 创建 FastAPI 应用
@@ -41,10 +42,27 @@ if mcp_app:
     app.mount("/mcp", mcp_app)
 
 
+@app.middleware("http")
+async def log_mcp_requests(request: Request, call_next):
+    if request.url.path.startswith("/mcp"):
+        accept = request.headers.get("accept")
+        content_type = request.headers.get("content-type")
+        print(f"[MCP] 请求: {request.method} {request.url.path} accept={accept} content-type={content_type}")
+    response = await call_next(request)
+    if request.url.path.startswith("/mcp"):
+        print(f"[MCP] 响应: {request.method} {request.url.path} status={response.status_code}")
+    return response
+
+
 @app.on_event("startup")
 async def preload_caches():
     """启动时预加载缓存"""
     try:
+        if mcp_app:
+            mcp_server = get_mcp_server()
+            if mcp_server:
+                app.state.mcp_session_manager_cm = mcp_server.session_manager.run()
+                await app.state.mcp_session_manager_cm.__aenter__()
         cache_dir = os.path.join(os.path.dirname(__file__), "cache")
         cache_service = CacheService(cache_dir)
         
@@ -71,6 +89,13 @@ async def preload_caches():
         pass
 
 
+@app.on_event("shutdown")
+async def shutdown_mcp():
+    cm = getattr(app.state, "mcp_session_manager_cm", None)
+    if cm:
+        await cm.__aexit__(None, None, None)
+
+
 @app.get("/")
 async def root():
     """服务根路径"""
@@ -91,4 +116,3 @@ async def config_page():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=6999)
-

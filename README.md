@@ -73,6 +73,7 @@ uvicorn main:app --host 0.0.0.0 --port 6999 --reload
 
 ## 使用示例
 
+### 命令行调用示例
 ```bash
 # 获取实时行情
 curl "http://localhost:6999/api/quote/sh600000"
@@ -94,6 +95,96 @@ curl -X POST "http://localhost:6999/api/history/batch" \
 curl -X POST "http://localhost:6999/api/server/test" \
   -H "Content-Type: application/json" \
   -d '{"ip":"129.204.230.128","port":7709}'
+
+# 验证服务状态
+curl "http://localhost:6999/api/status"
+```
+
+### Python项目调用示例
+```python
+import requests
+import json
+
+class TDXClient:
+    def __init__(self, base_url="http://localhost:6999"):
+        self.base_url = base_url
+    
+    def get_quote(self, symbol):
+        """获取单个股票行情"""
+        response = requests.get(f"{self.base_url}/api/quote/{symbol}")
+        if response.status_code == 200:
+            return response.json()
+        return None
+    
+    def get_batch_quotes(self, symbols):
+        """批量获取行情"""
+        response = requests.post(
+            f"{self.base_url}/api/quotes",
+            headers={"Content-Type": "application/json"},
+            data=json.dumps(symbols)
+        )
+        if response.status_code == 200:
+            return response.json()
+        return None
+
+# 使用示例
+client = TDXClient()
+quote = client.get_quote("sz000001")  # 获取平安银行行情
+print(quote)
+
+symbols = ["sh600036", "sz000002", "sh601318"]  # 招商银行, 万科A, 中国平安
+quotes = client.get_batch_quotes(symbols)
+print(quotes)
+```
+
+### Node.js项目调用示例
+```javascript
+const axios = require('axios');
+
+class TDXClient {
+    constructor(baseUrl = 'http://localhost:6999') {
+        this.baseUrl = baseUrl;
+    }
+    
+    async getQuote(symbol) {
+        try {
+            const response = await axios.get(`${this.baseUrl}/api/quote/${symbol}`);
+            return response.data;
+        } catch (error) {
+            console.error('获取行情失败:', error.message);
+            return null;
+        }
+    }
+    
+    async getBatchQuotes(symbols) {
+        try {
+            const response = await axios.post(
+                `${this.baseUrl}/api/quotes`,
+                symbols,
+                { headers: { 'Content-Type': 'application/json' } }
+            );
+            return response.data;
+        } catch (error) {
+            console.error('批量获取行情失败:', error.message);
+            return null;
+        }
+    }
+}
+
+// 使用示例
+async function main() {
+    const client = new TDXClient();
+    
+    const quote = await client.getQuote('sz000001');
+    console.log(quote);
+    
+    const symbols = ['sh600036', 'sz000002', 'sh601318'];
+    const quotes = await client.getBatchQuotes(symbols);
+    console.log(quotes);
+}
+
+main();
+```
 ```
 
 ## Docker 部署
